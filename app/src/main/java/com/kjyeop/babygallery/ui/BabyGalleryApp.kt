@@ -39,14 +39,16 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -66,6 +68,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -348,7 +351,7 @@ private fun LibraryScreen(
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             HeaderRow(
-                title = "아기 갤러리",
+                title = "Simple Gallery",
                 subtitle = if (library.items.isEmpty()) {
                     "표시할 사진이나 영상이 없습니다"
                 } else {
@@ -356,7 +359,8 @@ private fun LibraryScreen(
                 },
                 actionText = "시청 시작",
                 onAction = onStartWatching,
-                secondaryActionText = "새로고침",
+                secondaryActionIcon = Icons.Filled.Refresh,
+                secondaryActionContentDescription = "새로고침",
                 onSecondaryAction = onRefresh,
             )
         }
@@ -400,7 +404,8 @@ private fun HeaderRow(
     subtitle: String,
     actionText: String,
     onAction: () -> Unit,
-    secondaryActionText: String? = null,
+    secondaryActionIcon: ImageVector? = null,
+    secondaryActionContentDescription: String? = null,
     onSecondaryAction: (() -> Unit)? = null,
 ) {
     Row(
@@ -426,9 +431,12 @@ private fun HeaderRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (secondaryActionText != null && onSecondaryAction != null) {
-            TextButton(onClick = onSecondaryAction) {
-                Text(secondaryActionText)
+        if (secondaryActionIcon != null && onSecondaryAction != null) {
+            IconButton(onClick = onSecondaryAction) {
+                Icon(
+                    imageVector = secondaryActionIcon,
+                    contentDescription = secondaryActionContentDescription,
+                )
             }
             Spacer(modifier = Modifier.width(6.dp))
         }
@@ -518,8 +526,11 @@ private fun MediaGridScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            TextButton(onClick = onRefresh) {
-                Text("새로고침")
+            IconButton(onClick = onRefresh) {
+                Icon(
+                    imageVector = Icons.Filled.Refresh,
+                    contentDescription = "새로고침",
+                )
             }
             Spacer(modifier = Modifier.width(4.dp))
             Button(onClick = onStartWatching) {
