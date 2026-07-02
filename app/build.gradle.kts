@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -23,6 +22,24 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+androidComponents {
+    beforeVariants(selector().all()) { variant ->
+        (variant as? com.android.build.api.variant.HasDeviceTestsBuilder)
+            ?.deviceTests
+            ?.values
+            ?.forEach { it.enable = false }
+        (variant as? com.android.build.api.variant.HasHostTestsBuilder)
+            ?.hostTests
+            ?.values
+            ?.forEach { it.enable = false }
+        (variant as? com.android.build.api.variant.HasTestSuitesBuilder)
+            ?.suites
+            ?.values
+            ?.forEach { it.enable = false }
+        (variant as? com.android.build.api.variant.HasUnitTestBuilder)?.enableUnitTest = false
     }
 }
 
