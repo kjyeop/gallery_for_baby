@@ -49,6 +49,8 @@
 
 Android Studio에서는 이 프로젝트를 열고 `app` 실행 구성을 선택해 바로 실행할 수 있습니다.
 
+자세한 디버그 빌드, 기기 설치, 릴리스 APK 생성 및 로컬 설치 절차는 [Android 빌드/설치/배포 가이드](./docs/ANDROID_BUILD_INSTALL_DEPLOY.md)를 참고하세요.
+
 ## 권한
 
 앱은 로컬 사진과 영상을 읽기 위한 권한만 요청합니다.
@@ -87,4 +89,5 @@ app/src/main/java/com/kjyeop/babygallery/
 
 ## 제품 문서
 
-상세한 제품 방향, 기능 범위, 테스트 계획은 [BABY_GALLERY_PRODUCT_PLAN.md](./BABY_GALLERY_PRODUCT_PLAN.md)를 참고하세요.
+상세한 제품 방향, 기능 범위, 테스트 계획은 [BABY_GALLERY_PRODUCT_PLAN.md](./docs/BABY_GALLERY_PRODUCT_PLAN.md)를 참고하세요.
+빌드, 설치, 배포 절차는 [docs/ANDROID_BUILD_INSTALL_DEPLOY.md](./docs/ANDROID_BUILD_INSTALL_DEPLOY.md)를 참고하세요.

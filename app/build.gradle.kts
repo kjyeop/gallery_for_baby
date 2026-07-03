@@ -1,7 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.isFile) {
+        keystorePropertiesFile.inputStream().use(::load)
+    }
+}
+
+fun requireKeystoreProperty(name: String): String =
+    keystoreProperties.getProperty(name)
+        ?: error("Missing '$name' in ${keystorePropertiesFile.name}")
 
 android {
     namespace = "com.kjyeop.babygallery"
@@ -13,6 +26,25 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+    }
+
+    signingConfigs {
+        if (keystorePropertiesFile.isFile) {
+            create("release") {
+                storeFile = rootProject.file(requireKeystoreProperty("storeFile"))
+                storePassword = requireKeystoreProperty("storePassword")
+                keyAlias = requireKeystoreProperty("keyAlias")
+                keyPassword = requireKeystoreProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (keystorePropertiesFile.isFile) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     buildFeatures {

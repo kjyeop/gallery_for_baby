@@ -6,6 +6,13 @@ build/
 # Local configuration
 local.properties
 
+# Signing secrets
+*.jks
+*.keystore
+keystore.properties
+release-signing.properties
+keystores/
+
 # Android Studio / IntelliJ
 .idea/
 *.iml
