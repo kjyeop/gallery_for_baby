@@ -1,5 +1,6 @@
 package com.kjyeop.babygallery.ui
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -12,6 +13,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Size
+import android.util.LruCache
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
@@ -23,6 +25,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -67,6 +70,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -100,6 +104,7 @@ import com.kjyeop.babygallery.data.GalleryMedia
 import com.kjyeop.babygallery.data.GalleryMediaType
 import com.kjyeop.babygallery.data.LastViewStore
 import com.kjyeop.babygallery.data.MediaRepository
+import com.kjyeop.babygallery.data.MotionPhotoProbe
 import com.kjyeop.babygallery.data.MotionPhotoResolver
 import com.kjyeop.babygallery.data.MotionPhotoSource
 import com.kjyeop.babygallery.data.albumCollectionKey
@@ -109,9 +114,12 @@ import com.kjyeop.babygallery.data.titleForCollection
 import com.kjyeop.babygallery.permissions.hasMediaReadAccess
 import com.kjyeop.babygallery.permissions.requiredMediaPermissions
 import com.kjyeop.babygallery.R
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -643,28 +651,69 @@ private fun FullScreenViewer(
     val motionPhotoResolver = remember(context.applicationContext, companionCandidates) {
         MotionPhotoResolver(context.applicationContext, companionCandidates)
     }
+    val imageLoader = remember(context.applicationContext) {
+        FullScreenImageLoader(context.applicationContext)
+    }
+    var displayedImagePage by remember { mutableIntStateOf(-1) }
+    var prefetchedImagePage by remember { mutableIntStateOf(-1) }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
+        val maxViewportDp = if (maxWidth > maxHeight) maxWidth else maxHeight
+        val targetMaxSidePx = with(LocalDensity.current) {
+            maxViewportDp.roundToPx().coerceAtLeast(1)
+        }
+        val activePage = pagerState.settledPage.takeIf { !pagerState.isScrollInProgress }
+
+        LaunchedEffect(activePage, displayedImagePage, targetMaxSidePx, items) {
+            val currentPage = activePage ?: return@LaunchedEffect
+            if (displayedImagePage != currentPage) return@LaunchedEffect
+
+            val nearbyImages = listOfNotNull(
+                items.getOrNull(currentPage + 2),
+                items.getOrNull(currentPage - 2),
+            ).filter { it.type == GalleryMediaType.Image }
+            if (nearbyImages.isEmpty()) {
+                prefetchedImagePage = currentPage
+                return@LaunchedEffect
+            }
+
+            delay(PHOTO_PREFETCH_DELAY_MS)
+            nearbyImages.forEach { image ->
+                imageLoader.prefetch(image.uri, targetMaxSidePx)
+            }
+            prefetchedImagePage = currentPage
+        }
+
         HorizontalPager(
             state = pagerState,
+            beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxSize(),
         ) { page ->
             val media = items[page]
+            val shouldPreloadImage = activePage != null && (
+                page == activePage ||
+                    (displayedImagePage == activePage && abs(page - activePage) <= 1)
+                )
             when (media.type) {
                 GalleryMediaType.Image -> {
                     PhotoPage(
                         media = media,
-                        isActive = page == pagerState.currentPage,
+                        isActive = page == activePage,
+                        shouldLoadImage = shouldPreloadImage,
+                        targetMaxSidePx = targetMaxSidePx,
+                        imageLoader = imageLoader,
+                        onImageDisplayed = { displayedImagePage = page },
+                        canValidateAppleSource = prefetchedImagePage == page,
                         motionPhotoResolver = motionPhotoResolver,
                     )
                 }
                 GalleryMediaType.Video -> VideoPage(
                     media = media,
-                    isActive = page == pagerState.currentPage,
+                    isActive = page == activePage,
                 )
             }
         }
@@ -788,32 +837,92 @@ private fun calculateBatteryPercent(level: Int, scale: Int): Int? {
 private fun PhotoPage(
     media: GalleryMedia,
     isActive: Boolean,
+    shouldLoadImage: Boolean,
+    targetMaxSidePx: Int,
+    imageLoader: FullScreenImageLoader,
+    onImageDisplayed: () -> Unit,
+    canValidateAppleSource: Boolean,
     motionPhotoResolver: MotionPhotoResolver,
 ) {
     val context = LocalContext.current
-    var imageState by remember(media.uri) { mutableStateOf<BitmapLoadState>(BitmapLoadState.Loading) }
-    var motionSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
+    var imageState by remember(media.uri, targetMaxSidePx) {
+        mutableStateOf<BitmapLoadState>(BitmapLoadState.Loading)
+    }
+    var imageLoadStarted by remember(media.uri, targetMaxSidePx) { mutableStateOf(false) }
+    val imageLoadScope = rememberCoroutineScope()
+    var motionProbe by remember(media.uri) { mutableStateOf<MotionPhotoProbe?>(null) }
+    var verifiedAppleSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
+    var appleSourceValidationCompleted by remember(media.uri) { mutableStateOf(false) }
     var motionPlaybackFailed by remember(media.uri) { mutableStateOf(false) }
-    var showMotionVideo by remember(media.uri) { mutableStateOf(false) }
     var showMotionControls by remember(media.uri) { mutableStateOf(false) }
     var motionPlayerViewReady by remember(media.uri) { mutableStateOf(false) }
     var pendingMotionPlaybackStart by remember(media.uri) { mutableStateOf(false) }
+    var motionPlaybackLoading by remember(media.uri) { mutableStateOf(false) }
+    var playbackSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
 
-    LaunchedEffect(media.uri) {
-        imageState = BitmapLoadState.Loading
-        imageState = withContext(Dispatchers.IO) {
-            decodeFullBitmap(context, media.uri, maxSide = 4096)
+    LaunchedEffect(media.uri, shouldLoadImage, targetMaxSidePx) {
+        if (!shouldLoadImage || imageLoadStarted || imageState !is BitmapLoadState.Loading) {
+            return@LaunchedEffect
+        }
+
+        imageLoadStarted = true
+        imageLoadScope.launch {
+            imageState = imageLoader.load(media.uri, targetMaxSidePx)
                 ?.let(BitmapLoadState::Ready)
                 ?: BitmapLoadState.Failed
         }
     }
 
-    LaunchedEffect(media.uri, motionPhotoResolver) {
-        motionSource = motionPhotoResolver.resolve(media)
+    LaunchedEffect(isActive, imageState) {
+        if (isActive && imageState is BitmapLoadState.Ready) onImageDisplayed()
     }
 
-    val motionPlayer = remember(motionSource) {
-        motionSource?.let { source ->
+    LaunchedEffect(media.uri, isActive, motionPhotoResolver) {
+        if (!isActive || motionProbe != null) return@LaunchedEffect
+        motionProbe = motionPhotoResolver.probe(media)
+    }
+
+    LaunchedEffect(
+        motionProbe,
+        isActive,
+        imageState,
+        canValidateAppleSource,
+        appleSourceValidationCompleted,
+        motionPhotoResolver,
+    ) {
+        val appleProbe = motionProbe as? MotionPhotoProbe.AppleLivePhoto ?: return@LaunchedEffect
+        if (
+            !isActive ||
+                imageState !is BitmapLoadState.Ready ||
+                !canValidateAppleSource ||
+                appleSourceValidationCompleted
+        ) {
+            return@LaunchedEffect
+        }
+
+        delay(APPLE_LIVE_PHOTO_VALIDATION_DELAY_MS)
+        verifiedAppleSource = motionPhotoResolver.resolveForPlayback(appleProbe)
+        appleSourceValidationCompleted = true
+    }
+
+    LaunchedEffect(isActive) {
+        if (!isActive) {
+            showMotionControls = false
+            motionPlayerViewReady = false
+            pendingMotionPlaybackStart = false
+            motionPlaybackLoading = false
+            playbackSource = null
+        }
+    }
+
+    val motionSource = when (val probe = motionProbe) {
+        is MotionPhotoProbe.Embedded -> probe.source
+        is MotionPhotoProbe.AppleLivePhoto -> verifiedAppleSource
+        else -> null
+    }
+
+    val motionPlayer = remember(playbackSource) {
+        playbackSource?.let { source ->
             ExoPlayer.Builder(context).build().apply {
                 repeatMode = Player.REPEAT_MODE_OFF
                 setMediaItem(motionMediaItem(source))
@@ -822,23 +931,19 @@ private fun PhotoPage(
         }
     }
 
-    val startMotionPlayback: () -> Unit = start@{
-        if (motionPlayer == null) return@start
-        motionPlaybackFailed = false
-        showMotionVideo = true
-        showMotionControls = false
-        pendingMotionPlaybackStart = true
-    }
-
     if (motionPlayer != null) {
         DisposableEffect(motionPlayer) {
             val listener = object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) {
+                        motionPlaybackLoading = false
+                    }
                     if (playbackState == Player.STATE_ENDED) {
                         showMotionControls = false
-                        showMotionVideo = false
                         motionPlayerViewReady = false
                         pendingMotionPlaybackStart = false
+                        motionPlaybackLoading = false
+                        playbackSource = null
                     }
                 }
 
@@ -847,10 +952,14 @@ private fun PhotoPage(
                     motionPlayerViewReady = false
                     pendingMotionPlaybackStart = false
                     motionPlaybackFailed = true
-                    showMotionVideo = false
+                    motionPlaybackLoading = false
+                    playbackSource = null
                 }
             }
             motionPlayer.addListener(listener)
+            if (motionPlayer.playbackState == Player.STATE_READY) {
+                motionPlaybackLoading = false
+            }
 
             onDispose {
                 motionPlayer.removeListener(listener)
@@ -859,17 +968,9 @@ private fun PhotoPage(
         }
     }
 
-    LaunchedEffect(motionPlayer, isActive) {
-        if (!isActive) {
-            motionPlayer?.pause()
-            showMotionControls = false
-            pendingMotionPlaybackStart = false
-        }
-    }
-
-    LaunchedEffect(motionPlayer, showMotionVideo, motionPlayerViewReady, pendingMotionPlaybackStart) {
+    LaunchedEffect(motionPlayer, motionPlayerViewReady, pendingMotionPlaybackStart) {
         val player = motionPlayer
-        if (showMotionVideo && motionPlayerViewReady && pendingMotionPlaybackStart && player != null) {
+        if (motionPlayerViewReady && pendingMotionPlaybackStart && player != null) {
             pendingMotionPlaybackStart = false
             player.seekTo(0)
             player.play()
@@ -881,7 +982,9 @@ private fun PhotoPage(
         contentAlignment = Alignment.Center,
     ) {
         when (val state = imageState) {
-            BitmapLoadState.Loading -> CircularProgressIndicator(color = Color.White)
+            BitmapLoadState.Loading -> if (isActive) {
+                CircularProgressIndicator(color = Color.White)
+            }
             BitmapLoadState.Failed -> Text(
                 text = "사진을 표시할 수 없어요",
                 color = Color.White,
@@ -894,7 +997,7 @@ private fun PhotoPage(
             )
         }
 
-        if (showMotionVideo && motionPlayer != null) {
+        if (motionPlayer != null) {
             AndroidView(
                 factory = { viewContext ->
                     (LayoutInflater.from(viewContext)
@@ -913,7 +1016,7 @@ private fun PhotoPage(
                 update = {
                     it.player = motionPlayer
                     it.setOnClickListener { showMotionControls = !showMotionControls }
-                    if (showMotionVideo) it.post { motionPlayerViewReady = true }
+                    it.post { motionPlayerViewReady = true }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -928,9 +1031,48 @@ private fun PhotoPage(
             )
         }
 
-        if (motionSource != null && !showMotionVideo && !motionPlaybackFailed && isActive) {
+        if (motionPlaybackLoading) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 40.dp),
+                color = Color.Black.copy(alpha = 0.76f),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                    )
+                    Text(
+                        text = "모션 사진 준비 중",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+            }
+        }
+
+        if (
+            motionSource != null &&
+                motionPlayer == null &&
+                !motionPlaybackLoading &&
+                !motionPlaybackFailed &&
+                isActive
+        ) {
             Button(
-                onClick = startMotionPlayback,
+                onClick = {
+                    motionPlaybackFailed = false
+                    motionPlaybackLoading = true
+                    playbackSource = motionSource
+                    pendingMotionPlaybackStart = true
+                    showMotionControls = false
+                },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 40.dp),
@@ -958,36 +1100,49 @@ private fun VideoPage(
 ) {
     val context = LocalContext.current
     var hasError by remember(media.uri) { mutableStateOf(false) }
-    val player = remember(media.uri) {
-        ExoPlayer.Builder(context).build().apply {
-            repeatMode = Player.REPEAT_MODE_OFF
-            setMediaItem(ExoMediaItem.fromUri(media.uri))
-            prepare()
+    var showControls by remember(media.uri) { mutableStateOf(false) }
+    var playerViewReady by remember(media.uri, isActive) { mutableStateOf(false) }
+    var firstFrameRendered by remember(media.uri, isActive) { mutableStateOf(false) }
+    val player = remember(media.uri, isActive) {
+        if (isActive) {
+            ExoPlayer.Builder(context).build().apply {
+                repeatMode = Player.REPEAT_MODE_OFF
+                setMediaItem(ExoMediaItem.fromUri(media.uri))
+                prepare()
+            }
+        } else {
+            null
         }
     }
-    var showControls by remember(media.uri) { mutableStateOf(false) }
 
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                hasError = true
-                showControls = false
+    if (player != null) {
+        DisposableEffect(player) {
+            val listener = object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    hasError = true
+                    showControls = false
+                }
+
+                override fun onRenderedFirstFrame() {
+                    firstFrameRendered = true
+                }
+            }
+            player.addListener(listener)
+
+            onDispose {
+                player.removeListener(listener)
+                player.release()
             }
         }
-        player.addListener(listener)
 
-        onDispose {
-            player.removeListener(listener)
-            player.release()
+        LaunchedEffect(player, playerViewReady, hasError) {
+            if (playerViewReady && !hasError) player.play()
         }
-    }
-
-    LaunchedEffect(player, isActive, hasError) {
-        if (isActive && !hasError) {
-            player.play()
-        } else {
-            player.pause()
+    } else {
+        LaunchedEffect(isActive) {
             showControls = false
+            playerViewReady = false
+            firstFrameRendered = false
         }
     }
 
@@ -996,32 +1151,41 @@ private fun VideoPage(
             .fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
-        AndroidView(
-            factory = { viewContext ->
-                PlayerView(viewContext).apply {
-                    useController = false
-                    isClickable = true
-                    setOnClickListener {
+        if (player != null) {
+            AndroidView(
+                factory = { viewContext ->
+                    (LayoutInflater.from(viewContext)
+                        .inflate(R.layout.motion_photo_player_view, null) as PlayerView).apply {
+                        useController = false
+                        setKeepContentOnPlayerReset(true)
+                        isClickable = true
+                        setOnClickListener {
+                            if (!hasError) showControls = !showControls
+                        }
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                        this.player = player
+                        post { playerViewReady = true }
+                    }
+                },
+                update = {
+                    it.player = player
+                    it.setOnClickListener {
                         if (!hasError) showControls = !showControls
                     }
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    this.player = player
-                }
-            },
-            update = {
-                it.player = player
-                it.setOnClickListener {
-                    if (!hasError) showControls = !showControls
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+                    it.post { playerViewReady = true }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
-        if (showControls && !hasError) {
+        if (player != null && !firstFrameRendered && !hasError) {
+            CircularProgressIndicator(color = Color.White)
+        }
+
+        if (showControls && !hasError && player != null) {
             CompactVideoControls(
                 player = player,
                 visible = showControls,
@@ -1282,7 +1446,10 @@ private fun loadThumbnailBitmap(
                 )
             }
         }
-    }.getOrNull()
+    }.getOrElse { error ->
+        if (error is CancellationException) throw error
+        null
+    }
 }
 
 private fun decodeFullBitmap(
@@ -1304,7 +1471,7 @@ private fun decodeFullBitmap(
                         (height * scale).roundToInt().coerceAtLeast(1),
                     )
                 }
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.allocator = ImageDecoder.ALLOCATOR_HARDWARE
             }
         } else {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1325,7 +1492,45 @@ private fun decodeFullBitmap(
                 BitmapFactory.decodeStream(it, null, options)
             }
         }
-    }.getOrNull()
+    }.getOrElse { error ->
+        if (error is CancellationException) throw error
+        null
+    }
+}
+
+private data class FullScreenImageKey(
+    val uri: Uri,
+    val maxSidePx: Int,
+)
+
+/** Caches the current image and its adjacent pages so a completed swipe can render immediately. */
+private class FullScreenImageLoader(context: Context) {
+    private val appContext = context.applicationContext
+    private val cache = object : LruCache<FullScreenImageKey, Bitmap>(
+        fullScreenImageCacheSizeKb(appContext),
+    ) {
+        override fun sizeOf(key: FullScreenImageKey, bitmap: Bitmap): Int =
+            (bitmap.allocationByteCount / 1024).coerceAtLeast(1)
+    }
+
+    suspend fun load(uri: Uri, maxSidePx: Int): Bitmap? = withContext(Dispatchers.IO) {
+        val key = FullScreenImageKey(uri, maxSidePx)
+        cache.get(key) ?: decodeFullBitmap(appContext, uri, maxSidePx)?.also {
+            cache.put(key, it)
+        }
+    }
+
+    suspend fun prefetch(uri: Uri, maxSidePx: Int) {
+        load(uri, maxSidePx)
+    }
+}
+
+private fun fullScreenImageCacheSizeKb(context: Context): Int {
+    val memoryClassMb = context.getSystemService(ActivityManager::class.java)?.memoryClass ?: 192
+    return ((memoryClassMb * 1024) / 2).coerceIn(
+        minimumValue = 32 * 1024,
+        maximumValue = 192 * 1024,
+    )
 }
 
 private fun formatDuration(durationMillis: Long?): String {
@@ -1345,6 +1550,8 @@ private fun Long.validPlaybackDuration(): Long = takeIf { it > 0L } ?: 0L
 
 private const val LOW_BATTERY_THRESHOLD_PERCENT = 20
 private const val VIDEO_CONTROLLER_SHOW_TIMEOUT_MS = 3_000
+private const val PHOTO_PREFETCH_DELAY_MS = 100L
+private const val APPLE_LIVE_PHOTO_VALIDATION_DELAY_MS = 150L
 
 private fun Context.appSettingsIntent(): Intent =
     Intent(
