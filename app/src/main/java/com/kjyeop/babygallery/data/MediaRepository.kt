@@ -38,6 +38,7 @@ class MediaRepository(private val context: Context) {
             MediaStore.Images.Media.BUCKET_ID,
             MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
             MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.MIME_TYPE,
             MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.DATE_ADDED,
         )
@@ -56,6 +57,7 @@ class MediaRepository(private val context: Context) {
             val displayName = cursor.getOptionalString(MediaStore.Images.Media.DISPLAY_NAME)
                 ?.ifBlank { null }
                 ?: "사진"
+            val mimeType = cursor.getOptionalString(MediaStore.Images.Media.MIME_TYPE)
             val takenAt = cursor.mediaDateMillis(MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.DATE_ADDED)
 
             GalleryMedia(
@@ -65,6 +67,7 @@ class MediaRepository(private val context: Context) {
                 albumId = albumId,
                 albumName = albumName,
                 displayName = displayName,
+                mimeType = mimeType,
                 takenAtMillis = takenAt,
             )
         }
@@ -77,6 +80,7 @@ class MediaRepository(private val context: Context) {
             MediaStore.Video.Media.BUCKET_ID,
             MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
             MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.MIME_TYPE,
             MediaStore.Video.Media.DATE_TAKEN,
             MediaStore.Video.Media.DATE_ADDED,
             MediaStore.Video.Media.DURATION,
@@ -96,6 +100,7 @@ class MediaRepository(private val context: Context) {
             val displayName = cursor.getOptionalString(MediaStore.Video.Media.DISPLAY_NAME)
                 ?.ifBlank { null }
                 ?: "영상"
+            val mimeType = cursor.getOptionalString(MediaStore.Video.Media.MIME_TYPE)
             val takenAt = cursor.mediaDateMillis(MediaStore.Video.Media.DATE_TAKEN, MediaStore.Video.Media.DATE_ADDED)
             val duration = cursor.getOptionalLong(MediaStore.Video.Media.DURATION)?.takeIf { it > 0 }
 
@@ -106,6 +111,7 @@ class MediaRepository(private val context: Context) {
                 albumId = albumId,
                 albumName = albumName,
                 displayName = displayName,
+                mimeType = mimeType,
                 takenAtMillis = takenAt,
                 durationMillis = duration,
             )

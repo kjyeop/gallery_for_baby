@@ -17,6 +17,7 @@ data class GalleryMedia(
     val albumId: String,
     val albumName: String,
     val displayName: String,
+    val mimeType: String?,
     val takenAtMillis: Long,
     val durationMillis: Long? = null,
 )

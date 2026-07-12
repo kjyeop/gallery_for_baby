@@ -2,10 +2,12 @@ package com.kjyeop.babygallery.ui
 
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
@@ -18,7 +20,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +44,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -69,7 +71,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -82,6 +83,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -94,6 +96,8 @@ import com.kjyeop.babygallery.data.GalleryMedia
 import com.kjyeop.babygallery.data.GalleryMediaType
 import com.kjyeop.babygallery.data.LastViewStore
 import com.kjyeop.babygallery.data.MediaRepository
+import com.kjyeop.babygallery.data.MotionPhotoResolver
+import com.kjyeop.babygallery.data.MotionPhotoSource
 import com.kjyeop.babygallery.data.albumCollectionKey
 import com.kjyeop.babygallery.data.hasCollection
 import com.kjyeop.babygallery.data.itemsForCollection
@@ -250,6 +254,7 @@ private fun GalleryNavigator(
 
         "viewer" -> FullScreenViewer(
             items = library.itemsForCollection(selectedCollectionKey),
+            companionCandidates = library.items,
             initialIndex = viewerInitialIndex,
             onBack = { screen = "grid" },
         )
@@ -603,6 +608,7 @@ private fun EmptyState(
 @Composable
 private fun FullScreenViewer(
     items: List<GalleryMedia>,
+    companionCandidates: List<GalleryMedia>,
     initialIndex: Int,
     onBack: () -> Unit,
 ) {
@@ -627,6 +633,11 @@ private fun FullScreenViewer(
         initialPage = initialIndex.coerceIn(0, items.lastIndex),
         pageCount = { items.size },
     )
+    val context = LocalContext.current
+    val motionPhotoResolver = remember(context.applicationContext, companionCandidates) {
+        MotionPhotoResolver(context.applicationContext, companionCandidates)
+    }
+    var autoPlayedMotionMediaKeys by remember { mutableStateOf(emptySet<String>()) }
 
     Box(
         modifier = Modifier
@@ -639,7 +650,18 @@ private fun FullScreenViewer(
         ) { page ->
             val media = items[page]
             when (media.type) {
-                GalleryMediaType.Image -> PhotoPage(media = media)
+                GalleryMediaType.Image -> {
+                    val mediaKey = "${media.type}:${media.id}"
+                    PhotoPage(
+                        media = media,
+                        isActive = page == pagerState.currentPage,
+                        motionPhotoResolver = motionPhotoResolver,
+                        shouldAutoPlayMotion = mediaKey !in autoPlayedMotionMediaKeys,
+                        onMotionAutoPlayStarted = {
+                            autoPlayedMotionMediaKeys = autoPlayedMotionMediaKeys + mediaKey
+                        },
+                    )
+                }
                 GalleryMediaType.Video -> VideoPage(
                     media = media,
                     isActive = page == pagerState.currentPage,
@@ -661,6 +683,13 @@ private fun FullScreenViewer(
                 fontWeight = FontWeight.Bold,
             )
         }
+
+        LowBatteryIndicator(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(16.dp),
+        )
     }
 }
 
@@ -687,9 +716,88 @@ private fun HideSystemBarsForViewer() {
 }
 
 @Composable
-private fun PhotoPage(media: GalleryMedia) {
+private fun LowBatteryIndicator(modifier: Modifier = Modifier) {
+    val batteryPercent = rememberBatteryPercent()
+    if (batteryPercent == null || batteryPercent > LOW_BATTERY_THRESHOLD_PERCENT) return
+
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f),
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(20.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.BatteryAlert,
+                contentDescription = "배터리 부족",
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                text = "$batteryPercent%",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun rememberBatteryPercent(): Int? {
+    val context = LocalContext.current
+    var batteryPercent by remember { mutableStateOf<Int?>(null) }
+
+    DisposableEffect(context) {
+        fun update(intent: Intent?) {
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            batteryPercent = calculateBatteryPercent(level, scale)
+        }
+
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent) {
+                update(intent)
+            }
+        }
+        val stickyIntent = ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        update(stickyIntent)
+
+        onDispose {
+            context.unregisterReceiver(receiver)
+        }
+    }
+
+    return batteryPercent
+}
+
+private fun calculateBatteryPercent(level: Int, scale: Int): Int? {
+    if (level < 0 || scale <= 0) return null
+    return ((level.toFloat() / scale) * 100).roundToInt().coerceIn(0, 100)
+}
+
+@Composable
+private fun PhotoPage(
+    media: GalleryMedia,
+    isActive: Boolean,
+    motionPhotoResolver: MotionPhotoResolver,
+    shouldAutoPlayMotion: Boolean,
+    onMotionAutoPlayStarted: () -> Unit,
+) {
     val context = LocalContext.current
     var imageState by remember(media.uri) { mutableStateOf<BitmapLoadState>(BitmapLoadState.Loading) }
+    var motionSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
+    var motionPlaybackFailed by remember(media.uri) { mutableStateOf(false) }
+    var showMotionVideo by remember(media.uri) { mutableStateOf(false) }
+    var controllerRequestCount by remember(media.uri) { mutableIntStateOf(0) }
 
     LaunchedEffect(media.uri) {
         imageState = BitmapLoadState.Loading
@@ -697,6 +805,73 @@ private fun PhotoPage(media: GalleryMedia) {
             decodeFullBitmap(context, media.uri, maxSide = 4096)
                 ?.let(BitmapLoadState::Ready)
                 ?: BitmapLoadState.Failed
+        }
+    }
+
+    LaunchedEffect(media.uri, motionPhotoResolver) {
+        motionSource = motionPhotoResolver.resolve(media)
+    }
+
+    val motionPlayer = remember(motionSource) {
+        motionSource?.let { source ->
+            ExoPlayer.Builder(context).build().apply {
+                repeatMode = Player.REPEAT_MODE_OFF
+                setMediaItem(motionMediaItem(source))
+                prepare()
+            }
+        }
+    }
+    var motionPlayerView by remember(motionPlayer) { mutableStateOf<PlayerView?>(null) }
+
+    val startMotionPlayback: () -> Unit = start@{
+        val player = motionPlayer ?: return@start
+        motionPlaybackFailed = false
+        showMotionVideo = true
+        controllerRequestCount += 1
+        player.seekTo(0)
+        player.play()
+    }
+
+    if (motionPlayer != null) {
+        DisposableEffect(motionPlayer) {
+            val listener = object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_ENDED) {
+                        motionPlayerView?.hideController()
+                        showMotionVideo = false
+                    }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    motionPlayerView?.hideController()
+                    motionPlaybackFailed = true
+                    showMotionVideo = false
+                }
+            }
+            motionPlayer.addListener(listener)
+
+            onDispose {
+                motionPlayer.removeListener(listener)
+                motionPlayer.release()
+            }
+        }
+    }
+
+    LaunchedEffect(motionPlayer, isActive, shouldAutoPlayMotion, motionPlaybackFailed) {
+        if (!isActive) {
+            motionPlayer?.pause()
+            return@LaunchedEffect
+        }
+
+        if (motionPlayer != null && shouldAutoPlayMotion && !motionPlaybackFailed) {
+            onMotionAutoPlayStarted()
+            startMotionPlayback()
+        }
+    }
+
+    LaunchedEffect(motionPlayerView, controllerRequestCount, showMotionVideo) {
+        if (showMotionVideo && controllerRequestCount > 0) {
+            motionPlayerView?.showController()
         }
     }
 
@@ -717,7 +892,50 @@ private fun PhotoPage(media: GalleryMedia) {
                 contentScale = ContentScale.Fit,
             )
         }
+
+        if (showMotionVideo && motionPlayer != null) {
+            AndroidView(
+                factory = { viewContext ->
+                    PlayerView(viewContext).apply {
+                        useController = true
+                        setControllerAutoShow(false)
+                        setControllerHideOnTouch(true)
+                        setControllerShowTimeoutMs(VIDEO_CONTROLLER_SHOW_TIMEOUT_MS)
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                        player = motionPlayer
+                        motionPlayerView = this
+                    }
+                },
+                update = { it.player = motionPlayer },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        if (motionSource != null && !showMotionVideo && !motionPlaybackFailed && isActive) {
+            Button(
+                onClick = startMotionPlayback,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 40.dp),
+            ) {
+                Text("▶  모션 사진 보기")
+            }
+        }
     }
+}
+
+private fun motionMediaItem(source: MotionPhotoSource): ExoMediaItem = when (source) {
+    is MotionPhotoSource.Embedded -> ExoMediaItem.Builder()
+        .setUri(source.uri)
+        .apply {
+            source.mimeType?.let { setMimeType(it) }
+        }
+        .build()
+    is MotionPhotoSource.CompanionVideo -> ExoMediaItem.fromUri(source.uri)
 }
 
 @Composable
@@ -726,21 +944,18 @@ private fun VideoPage(
     isActive: Boolean,
 ) {
     val context = LocalContext.current
-    var isPlaying by remember(media.uri) { mutableStateOf(false) }
     var hasError by remember(media.uri) { mutableStateOf(false) }
     val player = remember(media.uri) {
         ExoPlayer.Builder(context).build().apply {
+            repeatMode = Player.REPEAT_MODE_OFF
             setMediaItem(ExoMediaItem.fromUri(media.uri))
             prepare()
         }
     }
+    var playerView by remember(player) { mutableStateOf<PlayerView?>(null) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-                isPlaying = isPlayingNow
-            }
-
             override fun onPlayerError(error: PlaybackException) {
                 hasError = true
             }
@@ -753,9 +968,10 @@ private fun VideoPage(
         }
     }
 
-    LaunchedEffect(player, isActive) {
+    LaunchedEffect(player, isActive, hasError, playerView) {
         if (isActive && !hasError) {
             player.play()
+            playerView?.showController()
         } else {
             player.pause()
         }
@@ -763,28 +979,23 @@ private fun VideoPage(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(player) {
-                detectTapGestures {
-                    if (player.isPlaying) {
-                        player.pause()
-                    } else if (!hasError) {
-                        player.play()
-                    }
-                }
-            },
+            .fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
         AndroidView(
             factory = { viewContext ->
                 PlayerView(viewContext).apply {
-                    useController = false
+                    useController = true
+                    setControllerAutoShow(true)
+                    setControllerHideOnTouch(true)
+                    setControllerShowTimeoutMs(VIDEO_CONTROLLER_SHOW_TIMEOUT_MS)
                     setBackgroundColor(android.graphics.Color.BLACK)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
                     this.player = player
+                    playerView = this
                 }
             },
             update = { it.player = player },
@@ -798,18 +1009,6 @@ private fun VideoPage(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(28.dp),
             )
-        } else if (!isPlaying) {
-            Surface(
-                color = Color.Black.copy(alpha = 0.55f),
-                shape = RoundedCornerShape(48.dp),
-            ) {
-                Text(
-                    text = "▶",
-                    color = Color.White,
-                    style = MaterialTheme.typography.headlineLarge,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
-                )
-            }
         }
     }
 }
@@ -979,6 +1178,9 @@ private fun formatDuration(durationMillis: Long?): String {
         "%d:%02d".format(minutes, seconds)
     }
 }
+
+private const val LOW_BATTERY_THRESHOLD_PERCENT = 20
+private const val VIDEO_CONTROLLER_SHOW_TIMEOUT_MS = 3_000
 
 private fun Context.appSettingsIntent(): Intent =
     Intent(

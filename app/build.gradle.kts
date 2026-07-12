@@ -57,24 +57,6 @@ android {
     }
 }
 
-androidComponents {
-    beforeVariants(selector().all()) { variant ->
-        (variant as? com.android.build.api.variant.HasDeviceTestsBuilder)
-            ?.deviceTests
-            ?.values
-            ?.forEach { it.enable = false }
-        (variant as? com.android.build.api.variant.HasHostTestsBuilder)
-            ?.hostTests
-            ?.values
-            ?.forEach { it.enable = false }
-        (variant as? com.android.build.api.variant.HasTestSuitesBuilder)
-            ?.suites
-            ?.values
-            ?.forEach { it.enable = false }
-        (variant as? com.android.build.api.variant.HasUnitTestBuilder)?.enableUnitTest = false
-    }
-}
-
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
@@ -90,9 +72,11 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.exifinterface:exifinterface:1.4.1")
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-ui:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
 }
