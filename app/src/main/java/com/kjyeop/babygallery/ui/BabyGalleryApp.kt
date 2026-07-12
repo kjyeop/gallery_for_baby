@@ -19,10 +19,12 @@ import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -31,9 +33,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -71,15 +75,18 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -119,6 +126,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -565,27 +576,176 @@ private fun MediaGridScreen(
             return
         }
 
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 112.dp),
-            state = state,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            itemsIndexed(
+        Box(modifier = Modifier.weight(1f)) {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 112.dp),
+                state = state,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                itemsIndexed(
+                    items = items,
+                    key = { _, item -> "${item.type}:${item.id}" },
+                ) { index, media ->
+                    MediaThumbnail(
+                        media = media,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(1f)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { onOpenViewer(index) },
+                    )
+                }
+            }
+
+            MediaGridScrollBar(
                 items = items,
-                key = { _, item -> "${item.type}:${item.id}" },
-            ) { index, media ->
-                MediaThumbnail(
-                    media = media,
+                state = state,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaGridScrollBar(
+    items: List<GalleryMedia>,
+    state: LazyGridState,
+    modifier: Modifier = Modifier,
+) {
+    val layoutInfo = state.layoutInfo
+    val totalItemCount = layoutInfo.totalItemsCount
+    val visibleItemCount = layoutInfo.visibleItemsInfo.size
+    if (visibleItemCount == 0 || totalItemCount <= visibleItemCount) return
+
+    val maxFirstVisibleIndex = (totalItemCount - visibleItemCount).coerceAtLeast(1)
+    val scrollProgress = (
+        state.firstVisibleItemIndex.toFloat() / maxFirstVisibleIndex.toFloat()
+    ).coerceIn(0f, 1f)
+    val visibleFraction = (visibleItemCount.toFloat() / totalItemCount.toFloat())
+        .coerceIn(0.12f, 1f)
+    val visibleDate = items
+        .getOrNull(state.firstVisibleItemIndex)
+        ?.takenAtMillis
+        ?.formatGalleryMonth()
+    var isDragging by remember { mutableStateOf(false) }
+    val isActive = state.isScrollInProgress || isDragging
+    var isDateChipVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(isActive) {
+        if (isActive) {
+            isDateChipVisible = true
+        } else {
+            delay(GRID_DATE_CHIP_HIDE_DELAY_MS)
+            isDateChipVisible = false
+        }
+    }
+    val indicatorAlpha by animateFloatAsState(
+        targetValue = if (isActive) 1f else 0.5f,
+        label = "grid scrollbar alpha",
+    )
+    val dateChipAlpha by animateFloatAsState(
+        targetValue = if (isDateChipVisible && visibleDate != null) 1f else 0f,
+        label = "grid date chip alpha",
+    )
+    val currentScrollProgress by rememberUpdatedState(scrollProgress)
+    val scope = rememberCoroutineScope()
+
+    BoxWithConstraints(modifier = modifier) {
+        val verticalInset = 12.dp
+        val trackHeight = (maxHeight - verticalInset * 2).coerceAtLeast(1.dp)
+        val thumbHeight = (maxHeight * visibleFraction)
+            .coerceAtLeast(40.dp)
+            .coerceAtMost(trackHeight)
+        val thumbTop = (trackHeight - thumbHeight) * scrollProgress
+        val dateChipTop = (verticalInset + thumbTop - 8.dp)
+            .coerceIn(8.dp, (maxHeight - GRID_DATE_CHIP_HEIGHT - 8.dp).coerceAtLeast(8.dp))
+        val availableScrollDistancePx = with(LocalDensity.current) {
+            (trackHeight - thumbHeight).toPx().coerceAtLeast(1f)
+        }
+
+        if ((isDateChipVisible || dateChipAlpha > 0f) && visibleDate != null) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(y = dateChipTop)
+                    .padding(end = 20.dp)
+                    .width(104.dp)
+                    .graphicsLayer { alpha = dateChipAlpha },
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                shape = RoundedCornerShape(18.dp),
+                shadowElevation = 4.dp,
+            ) {
+                Text(
+                    text = visibleDate,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(4.dp))
-                        .clickable { onOpenViewer(index) },
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
                 )
             }
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .fillMaxHeight()
+                .width(44.dp)
+                .pointerInput(
+                    maxFirstVisibleIndex,
+                    availableScrollDistancePx,
+                ) {
+                    var dragProgress = currentScrollProgress
+                    detectVerticalDragGestures(
+                        onDragStart = {
+                            isDragging = true
+                            dragProgress = currentScrollProgress
+                        },
+                        onDragEnd = { isDragging = false },
+                        onDragCancel = { isDragging = false },
+                        onVerticalDrag = { _, dragAmount ->
+                            dragProgress = (
+                                dragProgress + dragAmount / availableScrollDistancePx
+                            ).coerceIn(0f, 1f)
+                            scope.launch {
+                                state.scrollToItem(
+                                    index = (dragProgress * maxFirstVisibleIndex)
+                                        .roundToInt(),
+                                )
+                            }
+                        },
+                    )
+                }
+                .padding(top = verticalInset, bottom = verticalInset, end = 4.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .width(3.dp)
+                    .height(trackHeight)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f),
+                    ),
+            )
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(y = thumbTop)
+                    .width(6.dp)
+                    .height(thumbHeight)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = indicatorAlpha),
+                    ),
+            )
         }
     }
 }
@@ -1546,8 +1706,21 @@ private fun formatDuration(durationMillis: Long?): String {
     }
 }
 
+private fun Long.formatGalleryMonth(): String? {
+    if (this <= 0L) return null
+
+    val date = Instant.ofEpochMilli(this)
+        .atZone(ZoneId.systemDefault())
+        .toLocalDate()
+    return DateTimeFormatter
+        .ofPattern("yyyy년 M월", Locale.KOREA)
+        .format(date)
+}
+
 private fun Long.validPlaybackDuration(): Long = takeIf { it > 0L } ?: 0L
 
+private val GRID_DATE_CHIP_HEIGHT = 38.dp
+private const val GRID_DATE_CHIP_HIDE_DELAY_MS = 750L
 private const val LOW_BATTERY_THRESHOLD_PERCENT = 20
 private const val VIDEO_CONTROLLER_SHOW_TIMEOUT_MS = 3_000
 private const val PHOTO_PREFETCH_DELAY_MS = 100L
