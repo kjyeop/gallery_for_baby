@@ -12,6 +12,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Size
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -45,6 +46,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -53,6 +56,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -104,7 +108,9 @@ import com.kjyeop.babygallery.data.itemsForCollection
 import com.kjyeop.babygallery.data.titleForCollection
 import com.kjyeop.babygallery.permissions.hasMediaReadAccess
 import com.kjyeop.babygallery.permissions.requiredMediaPermissions
+import com.kjyeop.babygallery.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -637,7 +643,6 @@ private fun FullScreenViewer(
     val motionPhotoResolver = remember(context.applicationContext, companionCandidates) {
         MotionPhotoResolver(context.applicationContext, companionCandidates)
     }
-    var autoPlayedMotionMediaKeys by remember { mutableStateOf(emptySet<String>()) }
 
     Box(
         modifier = Modifier
@@ -651,15 +656,10 @@ private fun FullScreenViewer(
             val media = items[page]
             when (media.type) {
                 GalleryMediaType.Image -> {
-                    val mediaKey = "${media.type}:${media.id}"
                     PhotoPage(
                         media = media,
                         isActive = page == pagerState.currentPage,
                         motionPhotoResolver = motionPhotoResolver,
-                        shouldAutoPlayMotion = mediaKey !in autoPlayedMotionMediaKeys,
-                        onMotionAutoPlayStarted = {
-                            autoPlayedMotionMediaKeys = autoPlayedMotionMediaKeys + mediaKey
-                        },
                     )
                 }
                 GalleryMediaType.Video -> VideoPage(
@@ -789,15 +789,15 @@ private fun PhotoPage(
     media: GalleryMedia,
     isActive: Boolean,
     motionPhotoResolver: MotionPhotoResolver,
-    shouldAutoPlayMotion: Boolean,
-    onMotionAutoPlayStarted: () -> Unit,
 ) {
     val context = LocalContext.current
     var imageState by remember(media.uri) { mutableStateOf<BitmapLoadState>(BitmapLoadState.Loading) }
     var motionSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
     var motionPlaybackFailed by remember(media.uri) { mutableStateOf(false) }
     var showMotionVideo by remember(media.uri) { mutableStateOf(false) }
-    var controllerRequestCount by remember(media.uri) { mutableIntStateOf(0) }
+    var showMotionControls by remember(media.uri) { mutableStateOf(false) }
+    var motionPlayerViewReady by remember(media.uri) { mutableStateOf(false) }
+    var pendingMotionPlaybackStart by remember(media.uri) { mutableStateOf(false) }
 
     LaunchedEffect(media.uri) {
         imageState = BitmapLoadState.Loading
@@ -821,15 +821,13 @@ private fun PhotoPage(
             }
         }
     }
-    var motionPlayerView by remember(motionPlayer) { mutableStateOf<PlayerView?>(null) }
 
     val startMotionPlayback: () -> Unit = start@{
-        val player = motionPlayer ?: return@start
+        if (motionPlayer == null) return@start
         motionPlaybackFailed = false
         showMotionVideo = true
-        controllerRequestCount += 1
-        player.seekTo(0)
-        player.play()
+        showMotionControls = false
+        pendingMotionPlaybackStart = true
     }
 
     if (motionPlayer != null) {
@@ -837,13 +835,17 @@ private fun PhotoPage(
             val listener = object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) {
-                        motionPlayerView?.hideController()
+                        showMotionControls = false
                         showMotionVideo = false
+                        motionPlayerViewReady = false
+                        pendingMotionPlaybackStart = false
                     }
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
-                    motionPlayerView?.hideController()
+                    showMotionControls = false
+                    motionPlayerViewReady = false
+                    pendingMotionPlaybackStart = false
                     motionPlaybackFailed = true
                     showMotionVideo = false
                 }
@@ -857,21 +859,20 @@ private fun PhotoPage(
         }
     }
 
-    LaunchedEffect(motionPlayer, isActive, shouldAutoPlayMotion, motionPlaybackFailed) {
+    LaunchedEffect(motionPlayer, isActive) {
         if (!isActive) {
             motionPlayer?.pause()
-            return@LaunchedEffect
-        }
-
-        if (motionPlayer != null && shouldAutoPlayMotion && !motionPlaybackFailed) {
-            onMotionAutoPlayStarted()
-            startMotionPlayback()
+            showMotionControls = false
+            pendingMotionPlaybackStart = false
         }
     }
 
-    LaunchedEffect(motionPlayerView, controllerRequestCount, showMotionVideo) {
-        if (showMotionVideo && controllerRequestCount > 0) {
-            motionPlayerView?.showController()
+    LaunchedEffect(motionPlayer, showMotionVideo, motionPlayerViewReady, pendingMotionPlaybackStart) {
+        val player = motionPlayer
+        if (showMotionVideo && motionPlayerViewReady && pendingMotionPlaybackStart && player != null) {
+            pendingMotionPlaybackStart = false
+            player.seekTo(0)
+            player.play()
         }
     }
 
@@ -896,22 +897,34 @@ private fun PhotoPage(
         if (showMotionVideo && motionPlayer != null) {
             AndroidView(
                 factory = { viewContext ->
-                    PlayerView(viewContext).apply {
-                        useController = true
-                        setControllerAutoShow(false)
-                        setControllerHideOnTouch(true)
-                        setControllerShowTimeoutMs(VIDEO_CONTROLLER_SHOW_TIMEOUT_MS)
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    (LayoutInflater.from(viewContext)
+                        .inflate(R.layout.motion_photo_player_view, null) as PlayerView).apply {
+                        useController = false
+                        isClickable = true
+                        setOnClickListener { showMotionControls = !showMotionControls }
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
                         player = motionPlayer
-                        motionPlayerView = this
+                        post { motionPlayerViewReady = true }
                     }
                 },
-                update = { it.player = motionPlayer },
+                update = {
+                    it.player = motionPlayer
+                    it.setOnClickListener { showMotionControls = !showMotionControls }
+                    if (showMotionVideo) it.post { motionPlayerViewReady = true }
+                },
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        if (showMotionControls && motionPlayer != null) {
+            CompactVideoControls(
+                player = motionPlayer,
+                visible = showMotionControls,
+                onVisibilityChange = { showMotionControls = it },
+                modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
 
@@ -952,12 +965,13 @@ private fun VideoPage(
             prepare()
         }
     }
-    var playerView by remember(player) { mutableStateOf<PlayerView?>(null) }
+    var showControls by remember(media.uri) { mutableStateOf(false) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 hasError = true
+                showControls = false
             }
         }
         player.addListener(listener)
@@ -968,12 +982,12 @@ private fun VideoPage(
         }
     }
 
-    LaunchedEffect(player, isActive, hasError, playerView) {
+    LaunchedEffect(player, isActive, hasError) {
         if (isActive && !hasError) {
             player.play()
-            playerView?.showController()
         } else {
             player.pause()
+            showControls = false
         }
     }
 
@@ -985,22 +999,36 @@ private fun VideoPage(
         AndroidView(
             factory = { viewContext ->
                 PlayerView(viewContext).apply {
-                    useController = true
-                    setControllerAutoShow(true)
-                    setControllerHideOnTouch(true)
-                    setControllerShowTimeoutMs(VIDEO_CONTROLLER_SHOW_TIMEOUT_MS)
+                    useController = false
+                    isClickable = true
+                    setOnClickListener {
+                        if (!hasError) showControls = !showControls
+                    }
                     setBackgroundColor(android.graphics.Color.BLACK)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
                     this.player = player
-                    playerView = this
                 }
             },
-            update = { it.player = player },
+            update = {
+                it.player = player
+                it.setOnClickListener {
+                    if (!hasError) showControls = !showControls
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         )
+
+        if (showControls && !hasError) {
+            CompactVideoControls(
+                player = player,
+                visible = showControls,
+                onVisibilityChange = { showControls = it },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        }
 
         if (hasError) {
             Text(
@@ -1008,6 +1036,140 @@ private fun VideoPage(
                 color = Color.White,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(28.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactVideoControls(
+    player: Player,
+    visible: Boolean,
+    onVisibilityChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+
+    var isPlaying by remember(player) { mutableStateOf(player.isPlaying) }
+    var playbackState by remember(player) { mutableIntStateOf(player.playbackState) }
+    var durationMs by remember(player) { mutableStateOf(player.duration.validPlaybackDuration()) }
+    var positionMs by remember(player) { mutableStateOf(player.currentPosition.coerceAtLeast(0L)) }
+    var seekPositionMs by remember(player) { mutableStateOf(player.currentPosition.coerceAtLeast(0L)) }
+    var isSeeking by remember(player) { mutableStateOf(false) }
+
+    fun refreshProgress() {
+        val refreshedDurationMs = player.duration.validPlaybackDuration()
+        val maxPositionMs = if (refreshedDurationMs > 0L) refreshedDurationMs else Long.MAX_VALUE
+        val refreshedPositionMs = player.currentPosition
+            .coerceAtLeast(0L)
+            .coerceAtMost(maxPositionMs)
+
+        durationMs = refreshedDurationMs
+        positionMs = refreshedPositionMs
+        if (!isSeeking) seekPositionMs = refreshedPositionMs
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
+                isPlaying = isPlayingNow
+                refreshProgress()
+            }
+
+            override fun onPlaybackStateChanged(playbackStateNow: Int) {
+                playbackState = playbackStateNow
+                refreshProgress()
+            }
+        }
+
+        player.addListener(listener)
+        refreshProgress()
+
+        onDispose {
+            player.removeListener(listener)
+        }
+    }
+
+    LaunchedEffect(player, isSeeking) {
+        while (true) {
+            refreshProgress()
+            delay(250)
+        }
+    }
+
+    LaunchedEffect(visible, isPlaying, isSeeking) {
+        if (visible && isPlaying && !isSeeking) {
+            delay(VIDEO_CONTROLLER_SHOW_TIMEOUT_MS.toLong())
+            if (player.isPlaying && !isSeeking) onVisibilityChange(false)
+        }
+    }
+
+    val displayedPositionMs = if (isSeeking) seekPositionMs else positionMs
+    val sliderMax = durationMs.takeIf { it > 0L } ?: 1L
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 28.dp),
+        color = Color.Black.copy(alpha = 0.76f),
+        shape = RoundedCornerShape(8.dp),
+        shadowElevation = 4.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .height(56.dp)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            IconButton(
+                onClick = {
+                    if (player.isPlaying) {
+                        player.pause()
+                    } else {
+                        if (playbackState == Player.STATE_ENDED) player.seekTo(0)
+                        player.play()
+                    }
+                    refreshProgress()
+                },
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "일시정지" else "재생",
+                    tint = Color.White,
+                )
+            }
+            Text(
+                text = formatDuration(displayedPositionMs),
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(48.dp),
+            )
+            Slider(
+                value = displayedPositionMs
+                    .coerceIn(0L, sliderMax)
+                    .toFloat(),
+                onValueChange = { value ->
+                    isSeeking = true
+                    seekPositionMs = value.toLong().coerceIn(0L, durationMs)
+                },
+                onValueChangeFinished = {
+                    player.seekTo(seekPositionMs.coerceIn(0L, durationMs))
+                    isSeeking = false
+                    refreshProgress()
+                },
+                valueRange = 0f..sliderMax.toFloat(),
+                enabled = durationMs > 0L,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = formatDuration(durationMs),
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(48.dp),
             )
         }
     }
@@ -1178,6 +1340,8 @@ private fun formatDuration(durationMillis: Long?): String {
         "%d:%02d".format(minutes, seconds)
     }
 }
+
+private fun Long.validPlaybackDuration(): Long = takeIf { it > 0L } ?: 0L
 
 private const val LOW_BATTERY_THRESHOLD_PERCENT = 20
 private const val VIDEO_CONTROLLER_SHOW_TIMEOUT_MS = 3_000
