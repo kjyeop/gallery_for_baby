@@ -1,19 +1,12 @@
 package com.kjyeop.babygallery.ui
 
-import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.BatteryManager
-import android.os.Build
-import android.provider.MediaStore
 import android.provider.Settings
-import android.util.Size
-import android.util.LruCache
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
@@ -85,6 +78,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -110,6 +104,7 @@ import com.kjyeop.babygallery.data.GalleryLibrary
 import com.kjyeop.babygallery.data.GalleryMedia
 import com.kjyeop.babygallery.data.GalleryMediaType
 import com.kjyeop.babygallery.data.LastViewStore
+import com.kjyeop.babygallery.data.MediaCache
 import com.kjyeop.babygallery.data.MediaRepository
 import com.kjyeop.babygallery.data.MotionPhotoProbe
 import com.kjyeop.babygallery.data.MotionPhotoResolver
@@ -121,11 +116,8 @@ import com.kjyeop.babygallery.data.titleForCollection
 import com.kjyeop.babygallery.permissions.hasMediaReadAccess
 import com.kjyeop.babygallery.permissions.requiredMediaPermissions
 import com.kjyeop.babygallery.R
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -138,6 +130,7 @@ import kotlin.math.roundToInt
 fun BabyGalleryApp(
     mediaRepository: MediaRepository,
     lastViewStore: LastViewStore,
+    mediaCache: MediaCache,
     onStartAppPinning: () -> Boolean,
 ) {
     val context = LocalContext.current
@@ -157,6 +150,10 @@ fun BabyGalleryApp(
     }
 
     var loadState by remember { mutableStateOf<LibraryLoadState>(LibraryLoadState.Loading) }
+
+    LaunchedEffect(hasMediaAccess) {
+        if (!hasMediaAccess) mediaCache.clearForPermissionRevocation()
+    }
 
     LaunchedEffect(hasMediaAccess, reloadVersion) {
         if (hasMediaAccess) {
@@ -198,6 +195,7 @@ fun BabyGalleryApp(
             is LibraryLoadState.Loaded -> GalleryNavigator(
                 library = state.library,
                 lastViewStore = lastViewStore,
+                mediaCache = mediaCache,
                 onStartAppPinning = onStartAppPinning,
                 onRefresh = { reloadVersion += 1 },
             )
@@ -209,9 +207,19 @@ fun BabyGalleryApp(
 private fun GalleryNavigator(
     library: GalleryLibrary,
     lastViewStore: LastViewStore,
+    mediaCache: MediaCache,
     onStartAppPinning: () -> Boolean,
     onRefresh: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val motionPhotoResolver = remember(context.applicationContext, library.items) {
+        MotionPhotoResolver(context.applicationContext, library.items)
+    }
+    LaunchedEffect(mediaCache, motionPhotoResolver) {
+        mediaCache.memoryTrimEvents.collect {
+            motionPhotoResolver.clearCaches()
+        }
+    }
     var screen by rememberSaveable { mutableStateOf("library") }
     var selectedCollectionKey by rememberSaveable { mutableStateOf(ALL_COLLECTION_KEY) }
     var viewerInitialIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -267,6 +275,7 @@ private fun GalleryNavigator(
         "grid" -> MediaGridScreen(
             title = library.titleForCollection(selectedCollectionKey),
             items = library.itemsForCollection(selectedCollectionKey),
+            mediaCache = mediaCache,
             state = gridState,
             onBack = { screen = "library" },
             onRefresh = onRefresh,
@@ -279,13 +288,15 @@ private fun GalleryNavigator(
 
         "viewer" -> FullScreenViewer(
             items = library.itemsForCollection(selectedCollectionKey),
-            companionCandidates = library.items,
             initialIndex = viewerInitialIndex,
+            mediaCache = mediaCache,
+            motionPhotoResolver = motionPhotoResolver,
             onBack = { screen = "grid" },
         )
 
         else -> LibraryScreen(
             library = library,
+            mediaCache = mediaCache,
             onOpenAll = { openCollection(ALL_COLLECTION_KEY) },
             onOpenAlbum = { album -> openCollection(albumCollectionKey(album.id)) },
             onStartWatching = { startWatching(ALL_COLLECTION_KEY) },
@@ -367,6 +378,7 @@ private fun ErrorScreen(
 @Composable
 private fun LibraryScreen(
     library: GalleryLibrary,
+    mediaCache: MediaCache,
     onOpenAll: () -> Unit,
     onOpenAlbum: (GalleryAlbum) -> Unit,
     onStartWatching: () -> Unit,
@@ -408,6 +420,7 @@ private fun LibraryScreen(
         item {
             CollectionCard(
                 cover = library.items.firstOrNull(),
+                mediaCache = mediaCache,
                 title = "전체 사진 및 영상",
                 subtitle = "${library.items.size}개",
                 onClick = onOpenAll,
@@ -420,6 +433,7 @@ private fun LibraryScreen(
         ) { album ->
             CollectionCard(
                 cover = album.cover,
+                mediaCache = mediaCache,
                 title = album.name,
                 subtitle = "${album.itemCount}개",
                 onClick = { onOpenAlbum(album) },
@@ -479,6 +493,7 @@ private fun HeaderRow(
 @Composable
 private fun CollectionCard(
     cover: GalleryMedia?,
+    mediaCache: MediaCache,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
@@ -493,6 +508,7 @@ private fun CollectionCard(
         Column {
             MediaThumbnail(
                 media = cover,
+                mediaCache = mediaCache,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1.15f),
@@ -521,6 +537,7 @@ private fun CollectionCard(
 private fun MediaGridScreen(
     title: String,
     items: List<GalleryMedia>,
+    mediaCache: MediaCache,
     state: LazyGridState,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
@@ -591,6 +608,7 @@ private fun MediaGridScreen(
                 ) { index, media ->
                     MediaThumbnail(
                         media = media,
+                        mediaCache = mediaCache,
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(1f)
@@ -782,8 +800,9 @@ private fun EmptyState(
 @Composable
 private fun FullScreenViewer(
     items: List<GalleryMedia>,
-    companionCandidates: List<GalleryMedia>,
     initialIndex: Int,
+    mediaCache: MediaCache,
+    motionPhotoResolver: MotionPhotoResolver,
     onBack: () -> Unit,
 ) {
     HideSystemBarsForViewer()
@@ -807,15 +826,7 @@ private fun FullScreenViewer(
         initialPage = initialIndex.coerceIn(0, items.lastIndex),
         pageCount = { items.size },
     )
-    val context = LocalContext.current
-    val motionPhotoResolver = remember(context.applicationContext, companionCandidates) {
-        MotionPhotoResolver(context.applicationContext, companionCandidates)
-    }
-    val imageLoader = remember(context.applicationContext) {
-        FullScreenImageLoader(context.applicationContext)
-    }
     var displayedImagePage by remember { mutableIntStateOf(-1) }
-    var prefetchedImagePage by remember { mutableIntStateOf(-1) }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -837,15 +848,13 @@ private fun FullScreenViewer(
                 items.getOrNull(currentPage - 2),
             ).filter { it.type == GalleryMediaType.Image }
             if (nearbyImages.isEmpty()) {
-                prefetchedImagePage = currentPage
                 return@LaunchedEffect
             }
 
             delay(PHOTO_PREFETCH_DELAY_MS)
             nearbyImages.forEach { image ->
-                imageLoader.prefetch(image.uri, targetMaxSidePx)
+                mediaCache.prefetchFullScreen(image, targetMaxSidePx)
             }
-            prefetchedImagePage = currentPage
         }
 
         HorizontalPager(
@@ -865,9 +874,8 @@ private fun FullScreenViewer(
                         isActive = page == activePage,
                         shouldLoadImage = shouldPreloadImage,
                         targetMaxSidePx = targetMaxSidePx,
-                        imageLoader = imageLoader,
+                        mediaCache = mediaCache,
                         onImageDisplayed = { displayedImagePage = page },
-                        canValidateAppleSource = prefetchedImagePage == page,
                         motionPhotoResolver = motionPhotoResolver,
                     )
                 }
@@ -999,9 +1007,8 @@ private fun PhotoPage(
     isActive: Boolean,
     shouldLoadImage: Boolean,
     targetMaxSidePx: Int,
-    imageLoader: FullScreenImageLoader,
+    mediaCache: MediaCache,
     onImageDisplayed: () -> Unit,
-    canValidateAppleSource: Boolean,
     motionPhotoResolver: MotionPhotoResolver,
 ) {
     val context = LocalContext.current
@@ -1009,15 +1016,15 @@ private fun PhotoPage(
         mutableStateOf<BitmapLoadState>(BitmapLoadState.Loading)
     }
     var imageLoadStarted by remember(media.uri, targetMaxSidePx) { mutableStateOf(false) }
-    val imageLoadScope = rememberCoroutineScope()
     var motionProbe by remember(media.uri) { mutableStateOf<MotionPhotoProbe?>(null) }
     var verifiedAppleSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
     var appleSourceValidationCompleted by remember(media.uri) { mutableStateOf(false) }
     var motionPlaybackFailed by remember(media.uri) { mutableStateOf(false) }
     var showMotionControls by remember(media.uri) { mutableStateOf(false) }
     var motionPlayerViewReady by remember(media.uri) { mutableStateOf(false) }
-    var pendingMotionPlaybackStart by remember(media.uri) { mutableStateOf(false) }
+    var motionPlaybackRequested by remember(media.uri) { mutableStateOf(false) }
     var motionPlaybackLoading by remember(media.uri) { mutableStateOf(false) }
+    var motionPlayerReady by remember(media.uri) { mutableStateOf(false) }
     var playbackSource by remember(media.uri) { mutableStateOf<MotionPhotoSource?>(null) }
 
     LaunchedEffect(media.uri, shouldLoadImage, targetMaxSidePx) {
@@ -1026,11 +1033,9 @@ private fun PhotoPage(
         }
 
         imageLoadStarted = true
-        imageLoadScope.launch {
-            imageState = imageLoader.load(media.uri, targetMaxSidePx)
-                ?.let(BitmapLoadState::Ready)
-                ?: BitmapLoadState.Failed
-        }
+        imageState = mediaCache.loadFullScreen(media, targetMaxSidePx)
+            ?.let(BitmapLoadState::Ready)
+            ?: BitmapLoadState.Failed
     }
 
     LaunchedEffect(isActive, imageState) {
@@ -1046,7 +1051,6 @@ private fun PhotoPage(
         motionProbe,
         isActive,
         imageState,
-        canValidateAppleSource,
         appleSourceValidationCompleted,
         motionPhotoResolver,
     ) {
@@ -1054,7 +1058,6 @@ private fun PhotoPage(
         if (
             !isActive ||
                 imageState !is BitmapLoadState.Ready ||
-                !canValidateAppleSource ||
                 appleSourceValidationCompleted
         ) {
             return@LaunchedEffect
@@ -1069,8 +1072,9 @@ private fun PhotoPage(
         if (!isActive) {
             showMotionControls = false
             motionPlayerViewReady = false
-            pendingMotionPlaybackStart = false
+            motionPlaybackRequested = false
             motionPlaybackLoading = false
+            motionPlayerReady = false
             playbackSource = null
         }
     }
@@ -1079,6 +1083,21 @@ private fun PhotoPage(
         is MotionPhotoProbe.Embedded -> probe.source
         is MotionPhotoProbe.AppleLivePhoto -> verifiedAppleSource
         else -> null
+    }
+
+    LaunchedEffect(motionSource, isActive, imageState, motionPlaybackFailed) {
+        if (
+            !isActive ||
+                imageState !is BitmapLoadState.Ready ||
+                motionSource == null ||
+                playbackSource != null ||
+                motionPlaybackFailed
+        ) {
+            return@LaunchedEffect
+        }
+        motionPlaybackLoading = true
+        motionPlayerReady = false
+        playbackSource = motionSource
     }
 
     val motionPlayer = remember(playbackSource) {
@@ -1097,28 +1116,31 @@ private fun PhotoPage(
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_READY) {
                         motionPlaybackLoading = false
+                        motionPlayerReady = true
                     }
                     if (playbackState == Player.STATE_ENDED) {
                         showMotionControls = false
                         motionPlayerViewReady = false
-                        pendingMotionPlaybackStart = false
+                        motionPlaybackRequested = false
                         motionPlaybackLoading = false
-                        playbackSource = null
+                        motionPlayerReady = true
                     }
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
                     showMotionControls = false
                     motionPlayerViewReady = false
-                    pendingMotionPlaybackStart = false
+                    motionPlaybackRequested = false
                     motionPlaybackFailed = true
                     motionPlaybackLoading = false
+                    motionPlayerReady = false
                     playbackSource = null
                 }
             }
             motionPlayer.addListener(listener)
             if (motionPlayer.playbackState == Player.STATE_READY) {
                 motionPlaybackLoading = false
+                motionPlayerReady = true
             }
 
             onDispose {
@@ -1128,10 +1150,9 @@ private fun PhotoPage(
         }
     }
 
-    LaunchedEffect(motionPlayer, motionPlayerViewReady, pendingMotionPlaybackStart) {
+    LaunchedEffect(motionPlayer, motionPlayerViewReady, motionPlaybackRequested) {
         val player = motionPlayer
-        if (motionPlayerViewReady && pendingMotionPlaybackStart && player != null) {
-            pendingMotionPlaybackStart = false
+        if (motionPlayerViewReady && motionPlaybackRequested && player != null) {
             player.seekTo(0)
             player.play()
         }
@@ -1157,7 +1178,7 @@ private fun PhotoPage(
             )
         }
 
-        if (motionPlayer != null) {
+        if (motionPlayer != null && motionPlaybackRequested) {
             AndroidView(
                 factory = { viewContext ->
                     (LayoutInflater.from(viewContext)
@@ -1191,7 +1212,11 @@ private fun PhotoPage(
             )
         }
 
-        if (motionPlaybackLoading) {
+        val motionPreparationVisible = isActive && !motionPlaybackFailed && (
+            motionPlaybackLoading ||
+                (motionProbe is MotionPhotoProbe.AppleLivePhoto && !appleSourceValidationCompleted)
+            )
+        if (motionPreparationVisible) {
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1220,17 +1245,14 @@ private fun PhotoPage(
 
         if (
             motionSource != null &&
-                motionPlayer == null &&
-                !motionPlaybackLoading &&
+                motionPlayerReady &&
+                !motionPlaybackRequested &&
                 !motionPlaybackFailed &&
                 isActive
         ) {
             Button(
                 onClick = {
-                    motionPlaybackFailed = false
-                    motionPlaybackLoading = true
-                    playbackSource = motionSource
-                    pendingMotionPlaybackStart = true
+                    motionPlaybackRequested = true
                     showMotionControls = false
                 },
                 modifier = Modifier
@@ -1502,25 +1524,30 @@ private fun CompactVideoControls(
 @Composable
 private fun MediaThumbnail(
     media: GalleryMedia?,
+    mediaCache: MediaCache,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
-    val sizePx = with(LocalDensity.current) { 320.dp.roundToPx() }
-    var thumbnailState by remember(media?.uri, sizePx) {
-        mutableStateOf<BitmapLoadState>(BitmapLoadState.Loading)
+    var requestedMaxDimensionPx by remember { mutableIntStateOf(0) }
+    var thumbnailState by remember(media) {
+        mutableStateOf<BitmapLoadState>(
+            if (media == null) BitmapLoadState.Failed else BitmapLoadState.Loading,
+        )
     }
 
-    LaunchedEffect(media?.uri, sizePx) {
+    LaunchedEffect(media, requestedMaxDimensionPx, mediaCache) {
+        if (media == null || requestedMaxDimensionPx <= 0) return@LaunchedEffect
         thumbnailState = BitmapLoadState.Loading
-        thumbnailState = withContext(Dispatchers.IO) {
-            media?.let { loadThumbnailBitmap(context, it, sizePx) }
-                ?.let(BitmapLoadState::Ready)
-                ?: BitmapLoadState.Failed
-        }
+        thumbnailState = mediaCache.loadThumbnail(media, requestedMaxDimensionPx)
+            ?.let(BitmapLoadState::Ready)
+            ?: BitmapLoadState.Failed
     }
 
     Box(
-        modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+        modifier = modifier
+            .onSizeChanged { size ->
+                requestedMaxDimensionPx = max(size.width, size.height)
+            }
+            .background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
         when (val state = thumbnailState) {
@@ -1579,118 +1606,6 @@ private fun VideoBadge(
             )
         }
     }
-}
-
-@Suppress("DEPRECATION")
-private fun loadThumbnailBitmap(
-    context: Context,
-    media: GalleryMedia,
-    sizePx: Int,
-): Bitmap? {
-    return runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            context.contentResolver.loadThumbnail(media.uri, Size(sizePx, sizePx), null)
-        } else {
-            when (media.type) {
-                GalleryMediaType.Image -> MediaStore.Images.Thumbnails.getThumbnail(
-                    context.contentResolver,
-                    media.id,
-                    MediaStore.Images.Thumbnails.MINI_KIND,
-                    null,
-                )
-                GalleryMediaType.Video -> MediaStore.Video.Thumbnails.getThumbnail(
-                    context.contentResolver,
-                    media.id,
-                    MediaStore.Video.Thumbnails.MINI_KIND,
-                    null,
-                )
-            }
-        }
-    }.getOrElse { error ->
-        if (error is CancellationException) throw error
-        null
-    }
-}
-
-private fun decodeFullBitmap(
-    context: Context,
-    uri: Uri,
-    maxSide: Int,
-): Bitmap? {
-    return runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val source = ImageDecoder.createSource(context.contentResolver, uri)
-            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                val width = info.size.width
-                val height = info.size.height
-                val longestSide = max(width, height)
-                if (longestSide > maxSide) {
-                    val scale = maxSide.toFloat() / longestSide.toFloat()
-                    decoder.setTargetSize(
-                        (width * scale).roundToInt().coerceAtLeast(1),
-                        (height * scale).roundToInt().coerceAtLeast(1),
-                    )
-                }
-                decoder.allocator = ImageDecoder.ALLOCATOR_HARDWARE
-            }
-        } else {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, bounds)
-            }
-
-            var sampleSize = 1
-            while (bounds.outWidth / sampleSize > maxSide || bounds.outHeight / sampleSize > maxSide) {
-                sampleSize *= 2
-            }
-
-            val options = BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            }
-            context.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, options)
-            }
-        }
-    }.getOrElse { error ->
-        if (error is CancellationException) throw error
-        null
-    }
-}
-
-private data class FullScreenImageKey(
-    val uri: Uri,
-    val maxSidePx: Int,
-)
-
-/** Caches the current image and its adjacent pages so a completed swipe can render immediately. */
-private class FullScreenImageLoader(context: Context) {
-    private val appContext = context.applicationContext
-    private val cache = object : LruCache<FullScreenImageKey, Bitmap>(
-        fullScreenImageCacheSizeKb(appContext),
-    ) {
-        override fun sizeOf(key: FullScreenImageKey, bitmap: Bitmap): Int =
-            (bitmap.allocationByteCount / 1024).coerceAtLeast(1)
-    }
-
-    suspend fun load(uri: Uri, maxSidePx: Int): Bitmap? = withContext(Dispatchers.IO) {
-        val key = FullScreenImageKey(uri, maxSidePx)
-        cache.get(key) ?: decodeFullBitmap(appContext, uri, maxSidePx)?.also {
-            cache.put(key, it)
-        }
-    }
-
-    suspend fun prefetch(uri: Uri, maxSidePx: Int) {
-        load(uri, maxSidePx)
-    }
-}
-
-private fun fullScreenImageCacheSizeKb(context: Context): Int {
-    val memoryClassMb = context.getSystemService(ActivityManager::class.java)?.memoryClass ?: 192
-    return ((memoryClassMb * 1024) / 2).coerceIn(
-        minimumValue = 32 * 1024,
-        maximumValue = 192 * 1024,
-    )
 }
 
 private fun formatDuration(durationMillis: Long?): String {

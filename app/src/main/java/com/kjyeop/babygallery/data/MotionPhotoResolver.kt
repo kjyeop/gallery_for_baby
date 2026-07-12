@@ -16,7 +16,7 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.ConcurrentHashMap
+import java.util.LinkedHashMap
 
 /** A playable video associated with a still image. */
 sealed interface MotionPhotoSource {
@@ -56,8 +56,8 @@ internal interface MotionPhotoMetadataReader {
 /**
  * Resolves a photo's optional motion video without ever copying or changing gallery media.
  *
- * Image probing is cached per URI. iPhone companion-video indexing starts only after the user asks
- * to play a detected Live Photo, and checks for cancellation between each candidate file.
+ * Image probing is cached per URI. iPhone companion-video indexing starts only after the user
+ * opens a detected Live Photo, and checks for cancellation between each candidate file.
  */
 class MotionPhotoResolver internal constructor(
     private val libraryItems: List<GalleryMedia>,
@@ -86,7 +86,7 @@ class MotionPhotoResolver internal constructor(
         }
     }
 
-    /** Resolves a source only when the user explicitly requests motion playback. */
+    /** Resolves a source after the active photo is displayed, before the user starts playback. */
     internal suspend fun resolveForPlayback(probe: MotionPhotoProbe): MotionPhotoSource? = when (probe) {
         MotionPhotoProbe.None -> null
         is MotionPhotoProbe.Embedded -> probe.source
@@ -108,19 +108,41 @@ class MotionPhotoResolver internal constructor(
         return MotionPhotoProbe.AppleLivePhoto(identifier)
     }
 
+    /** Drops all disposable metadata state when the library changes or the process is trimmed. */
+    internal suspend fun clearCaches() {
+        probes.clear()
+        appleCompanionIndex.clear()
+    }
+
 }
 
 /** Keeps per-media probes reusable without retaining any decoded image data. */
-internal class MotionPhotoProbeCache<Key : Any, Value : Any> {
-    private val values = ConcurrentHashMap<Key, Value>()
+internal class MotionPhotoProbeCache<Key : Any, Value : Any>(
+    private val maxEntries: Int = MOTION_PHOTO_PROBE_CACHE_ENTRIES,
+) {
+    private val values = object : LinkedHashMap<Key, Value>(maxEntries, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, Value>?): Boolean =
+            size > maxEntries
+    }
 
+    @Synchronized
     operator fun get(key: Key): Value? = values[key]
 
     fun getOrPut(key: Key, detect: () -> Value): Value {
-        values[key]?.let { return it }
+        get(key)?.let { return it }
         val detected = detect()
-        return values.putIfAbsent(key, detected) ?: detected
+        synchronized(this) {
+            return values[key] ?: detected.also { values[key] = it }
+        }
     }
+
+    @Synchronized
+    fun clear() {
+        values.clear()
+    }
+
+    @Synchronized
+    internal fun size(): Int = values.size
 }
 
 /** Builds and caches Apple Live Photo companion identifiers only after a playback lookup. */
@@ -136,6 +158,13 @@ internal class LazyAppleCompanionIndex<Key>(
     private var indexInFlight: CompletableDeferred<Map<String, Key>>? = null
 
     suspend fun find(imageIdentifier: String): Key? = buildIndex()[imageIdentifier.uppercase()]
+
+    suspend fun clear() {
+        indexMutex.withLock {
+            index = null
+            indexInFlight = null
+        }
+    }
 
     private suspend fun buildIndex(): Map<String, Key> {
         index?.let { return it }
@@ -162,8 +191,10 @@ internal class LazyAppleCompanionIndex<Key>(
         return try {
             val builtIndex = buildCandidateIndex()
             indexMutex.withLock {
-                index = builtIndex
-                if (indexInFlight === indexDeferred) indexInFlight = null
+                if (indexInFlight === indexDeferred) {
+                    index = builtIndex
+                    indexInFlight = null
+                }
             }
             indexDeferred.complete(builtIndex)
             builtIndex
@@ -328,3 +359,4 @@ private fun java.nio.channels.FileChannel.readWindow(
 
 private const val FILE_METADATA_WINDOW_BYTES = 1_048_576
 private const val FILE_METADATA_FALLBACK_BYTES = 2_097_152
+private const val MOTION_PHOTO_PROBE_CACHE_ENTRIES = 512

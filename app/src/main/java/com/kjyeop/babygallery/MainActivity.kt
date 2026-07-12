@@ -12,6 +12,7 @@ import com.kjyeop.babygallery.ui.theme.BabyGalleryTheme
 class MainActivity : ComponentActivity() {
     private val mediaRepository by lazy { MediaRepository(applicationContext) }
     private val lastViewStore by lazy { LastViewStore(applicationContext) }
+    private val mediaCache by lazy { (application as BabyGalleryApplication).mediaCache }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -21,6 +22,7 @@ class MainActivity : ComponentActivity() {
                 BabyGalleryApp(
                     mediaRepository = mediaRepository,
                     lastViewStore = lastViewStore,
+                    mediaCache = mediaCache,
                     onStartAppPinning = ::startAppPinning,
                 )
             }

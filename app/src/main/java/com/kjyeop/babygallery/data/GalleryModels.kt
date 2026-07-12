@@ -20,6 +20,9 @@ data class GalleryMedia(
     val mimeType: String?,
     val takenAtMillis: Long,
     val durationMillis: Long? = null,
+    /** MediaStore values used to invalidate generated thumbnail cache entries. */
+    val dateModifiedSeconds: Long = 0L,
+    val sizeBytes: Long = 0L,
 )
 
 data class GalleryAlbum(

@@ -81,6 +81,32 @@ class MotionPhotoMetadataTest {
     }
 
     @Test
+    fun `evicts least recently used motion-photo probes at the configured limit`() {
+        val cache = MotionPhotoProbeCache<String, String>(maxEntries = 2)
+        cache.getOrPut("first") { "first" }
+        cache.getOrPut("second") { "second" }
+        assertEquals("first", cache["first"])
+
+        cache.getOrPut("third") { "third" }
+
+        assertEquals("first", cache["first"])
+        assertNull(cache["second"])
+        assertEquals("third", cache["third"])
+        assertEquals(2, cache.size())
+    }
+
+    @Test
+    fun `clearing motion-photo probes drops all retained metadata`() {
+        val cache = MotionPhotoProbeCache<String, String>()
+        cache.getOrPut("content://images/1") { "embedded" }
+
+        cache.clear()
+
+        assertNull(cache["content://images/1"])
+        assertEquals(0, cache.size())
+    }
+
+    @Test
     fun `defers and caches Apple companion indexing until playback lookup`() = runBlocking {
         val identifier = "6D6B8B76-08BA-4D9A-8382-2AA0EFAB599B"
         val readCandidates = mutableListOf<String>()

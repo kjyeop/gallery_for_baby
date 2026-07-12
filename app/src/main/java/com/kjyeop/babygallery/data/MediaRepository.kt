@@ -41,6 +41,8 @@ class MediaRepository(private val context: Context) {
             MediaStore.Images.Media.MIME_TYPE,
             MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.DATE_MODIFIED,
+            MediaStore.Images.Media.SIZE,
         )
 
         return safeQuery(
@@ -59,6 +61,8 @@ class MediaRepository(private val context: Context) {
                 ?: "사진"
             val mimeType = cursor.getOptionalString(MediaStore.Images.Media.MIME_TYPE)
             val takenAt = cursor.mediaDateMillis(MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.DATE_ADDED)
+            val dateModified = cursor.getOptionalLong(MediaStore.Images.Media.DATE_MODIFIED) ?: 0L
+            val sizeBytes = cursor.getOptionalLong(MediaStore.Images.Media.SIZE) ?: 0L
 
             GalleryMedia(
                 id = id,
@@ -69,6 +73,8 @@ class MediaRepository(private val context: Context) {
                 displayName = displayName,
                 mimeType = mimeType,
                 takenAtMillis = takenAt,
+                dateModifiedSeconds = dateModified,
+                sizeBytes = sizeBytes,
             )
         }
     }
@@ -84,6 +90,8 @@ class MediaRepository(private val context: Context) {
             MediaStore.Video.Media.DATE_TAKEN,
             MediaStore.Video.Media.DATE_ADDED,
             MediaStore.Video.Media.DURATION,
+            MediaStore.Video.Media.DATE_MODIFIED,
+            MediaStore.Video.Media.SIZE,
         )
 
         return safeQuery(
@@ -103,6 +111,8 @@ class MediaRepository(private val context: Context) {
             val mimeType = cursor.getOptionalString(MediaStore.Video.Media.MIME_TYPE)
             val takenAt = cursor.mediaDateMillis(MediaStore.Video.Media.DATE_TAKEN, MediaStore.Video.Media.DATE_ADDED)
             val duration = cursor.getOptionalLong(MediaStore.Video.Media.DURATION)?.takeIf { it > 0 }
+            val dateModified = cursor.getOptionalLong(MediaStore.Video.Media.DATE_MODIFIED) ?: 0L
+            val sizeBytes = cursor.getOptionalLong(MediaStore.Video.Media.SIZE) ?: 0L
 
             GalleryMedia(
                 id = id,
@@ -114,6 +124,8 @@ class MediaRepository(private val context: Context) {
                 mimeType = mimeType,
                 takenAtMillis = takenAt,
                 durationMillis = duration,
+                dateModifiedSeconds = dateModified,
+                sizeBytes = sizeBytes,
             )
         }
     }
